@@ -20,6 +20,7 @@ package com.waz.znet2.http
 import java.io.{ByteArrayInputStream, File, FileInputStream}
 
 import com.waz.utils.JsonEncoder
+import io.circe.{Encoder, Json}
 import org.json.JSONObject
 
 trait RequestSerializer[T] {
@@ -109,5 +110,13 @@ object RawBodySerializer {
 
   implicit def objectToJsonBodySerializer[T](implicit e: JsonEncoder[T]): RawBodySerializer[T] =
     JsonBodySerializer.contramap(e.apply)
+
+  implicit val CirceJsonBodySerializer: RawBodySerializer[Json] = create(json => {
+    val bytes = json.noSpaces.getBytes("utf8")
+    RawBody(Some(MediaType.Json), () => new ByteArrayInputStream(bytes), Some(bytes.length))
+  })
+
+  implicit def objectToCirceJsonBodySerializer[T](implicit e: Encoder[T]): RawBodySerializer[T] =
+    CirceJsonBodySerializer.contramap(e.apply)
 
 }

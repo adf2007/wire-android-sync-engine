@@ -127,13 +127,18 @@ lazy val zmessaging = project
       Deps.cryptobox,
       Deps.genericMessage,
       Deps.backendApi,
+      Deps.circeCore,
+      Deps.circeGeneric,
+      Deps.circeParser,
       "com.wire" % "icu4j-shrunk" % "57.1",
       "org.threeten" % "threetenbp" % "1.3.+" % Provided,
       "com.googlecode.mp4parser" % "isoparser" % "1.1.7",
       "net.java.dev.jna" % "jna" % "4.4.0" % Provided,
       "org.robolectric" % "android-all" % RobolectricVersion % Provided,
       compilerPlugin("com.github.ghik" %% "silencer-plugin" % "0.6"),
-      "com.github.ghik" %% "silencer-lib" % "0.6"
+      "com.github.ghik" %% "silencer-lib" % "0.6",
+
+      "org.scalatest" %% "scalatest" % "3.0.5" % Test
     )
   )
 

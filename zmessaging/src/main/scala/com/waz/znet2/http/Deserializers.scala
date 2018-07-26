@@ -17,10 +17,11 @@
  */
 package com.waz.znet2.http
 
-import java.io.{ File, FileOutputStream }
+import java.io.{File, FileOutputStream}
 
-import com.waz.utils.{ returning, IoUtils, JsonDecoder }
-import org.json.{ JSONArray, JSONObject }
+import com.waz.utils.{IoUtils, JsonDecoder, returning}
+import io.circe.{Decoder, Json}
+import org.json.{JSONArray, JSONObject}
 
 trait ResponseDeserializer[T] {
   def deserialize(response: Response[Body]): T
@@ -111,6 +112,18 @@ object RawBodyDeserializer {
 
   implicit def objectFromJsonRawBodyDeserializer[T](implicit d: JsonDecoder[T]): RawBodyDeserializer[T] =
     JsonRawBodyDeserializer.map(d(_))
+
+  implicit val CirceJsonRawBodyDeserializer: RawBodyDeserializer[Json] =
+    StringRawBodyDeserializer.map(str => io.circe.parser.parse(str) match {
+      case Right(json) => json
+      case Left(error) => throw new IllegalArgumentException(error.message)
+    })
+
+  implicit def objectFromCirceJsonRawBodyDeserializer[T](implicit d: Decoder[T]): RawBodyDeserializer[T] =
+    CirceJsonRawBodyDeserializer.map(json => d.decodeJson(json) match {
+      case Right(result) => result
+      case Left(error) => throw new IllegalArgumentException(error.message)
+    })
 
   def createFileRawBodyDeserializer(targetFile: => File): RawBodyDeserializer[File] =
     create { body =>
