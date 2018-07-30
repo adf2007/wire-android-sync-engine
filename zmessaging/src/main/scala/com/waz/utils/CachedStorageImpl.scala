@@ -22,13 +22,13 @@ import com.waz.ZLog._
 import com.waz.content.Database
 import com.waz.db.DaoIdOps
 import com.waz.threading.SerialDispatchQueue
-import com.waz.utils.events.{AggregatingSignal, EventStream, Signal}
+import com.waz.utils.events._
 import com.waz.utils.wrappers.DB
 
 import scala.collection.JavaConverters._
 import scala.collection.generic._
 import scala.collection.{GenTraversableOnce, breakOut}
-import scala.concurrent.Future
+import scala.concurrent.{ExecutionContext, Future}
 
 trait StorageDao[K, V] {
   val idExtractor: (V => K)
@@ -51,6 +51,142 @@ object StorageDao {
   }
 }
 
+trait Storage2[K,V] {
+  protected val keyExtractor: V => K
+  implicit protected def ec: ExecutionContext
+
+  def load(keys: Set[K]): Future[Seq[V]]
+  def save(values: Seq[V]): Future[Unit]
+  def delete(keys: Set[K]): Future[Unit]
+
+  def load(key: K): Future[Option[V]] = load(Set(key)).map(_.headOption)
+  def delete(key: K): Future[Unit] = delete(Set(key))
+}
+
+trait ReactiveStorage2[K, V] extends Storage2[K, V] {
+  def onAdded: EventStream[Seq[V]]
+  def onUpdated: EventStream[Seq[(V, V)]]
+  def onDeleted: EventStream[Set[K]]
+
+  def onChanged(key: K): EventStream[V] =
+    onUpdated
+      .map(_.view.map { case (old, updated) => updated }.find(v => keyExtractor(v) == key))
+      .collect { case Some(v) => v }
+
+  def onRemoved(key: K): EventStream[K] =
+    onDeleted.map(_.view.find(_ == key)).collect { case Some(k) => k }
+
+  def optSignal(key: K): Signal[Option[V]] =
+    Signal.wrap(onChanged(key).map(Option(_)).union(onRemoved(key).map(_ => Option.empty[V])))
+
+  def signal(key: K): Signal[V] =
+    optSignal(key).collect { case Some(v) => v }
+}
+
+class DbStorage2[K,V](dao: StorageDao[K,V])
+                     (implicit
+                      override protected val ec: ExecutionContext,
+                      db: DB) extends Storage2[K,V] {
+
+  override protected val keyExtractor: V => K = dao.idExtractor
+
+  override def load(keys: Set[K]): Future[Seq[V]] = Future(dao.getAll(keys))
+  override def save(values: Seq[V]): Future[Unit] = Future(dao.insertOrReplace(values))
+  override def delete(keys: Set[K]): Future[Unit] = Future(dao.deleteEvery(keys))
+}
+
+class InMemoryStorage2[K, V](cache: LruCache[K, V],
+                             override protected val keyExtractor: V => K)
+                            (implicit
+                             override protected val ec: ExecutionContext) extends Storage2[K, V] {
+
+  override def load(keys: Set[K]): Future[Seq[V]] = Future(keys.toSeq.flatMap(k => Option(cache.get(k))))
+  override def save(values: Seq[V]): Future[Unit] = Future(values.foreach(v => cache.put(keyExtractor(v), v)))
+  override def delete(keys: Set[K]): Future[Unit] = Future(keys.foreach(cache.remove))
+}
+
+class CachedStorage2[K,V](main: Storage2[K,V], cache: Storage2[K,V])
+                         (implicit
+                          override protected val ec: ExecutionContext) extends Storage2[K, V] {
+
+  require(main.keyExtractor == cache.keyExtractor)//TODO Think how to make this explicit
+
+  override protected val keyExtractor: V => K = main.keyExtractor
+
+  override def load(keys: Set[K]): Future[Seq[V]] =
+    for {
+      fromCache <- cache.load(keys)
+      fromMain <-
+        if (keys.size == fromCache.size) Future.successful(Seq.empty)
+        else {
+          val cachedKeys = fromCache.map(keyExtractor)
+          val missingKeys = keys -- cachedKeys
+          main.load(missingKeys)
+        }
+    } yield {
+      if (fromMain.nonEmpty) cache.save(fromMain)
+      fromCache ++ fromMain
+    }
+
+  override def save(values: Seq[V]): Future[Unit] =
+    for {
+      _ <- main.save(values)
+      _ <- cache.save(values)
+    } yield ()
+
+  override def delete(keys: Set[K]): Future[Unit] = {
+    for {
+      _ <- main.delete(keys)
+      _ <- cache.delete(keys)
+    } yield ()
+  }
+
+}
+
+class ReactiveStorageImpl2[K, V](storage: Storage2[K,V]) extends ReactiveStorage2[K, V] {
+
+  override val onAdded: SourceStream[Seq[V]] = EventStream()
+  override val onUpdated: SourceStream[Seq[(V, V)]] = EventStream()
+  override val onDeleted: SourceStream[Set[K]] = EventStream()
+
+  override protected val keyExtractor: V => K = storage.keyExtractor
+  override implicit protected def ec: ExecutionContext = storage.ec
+
+  override def load(keys: Set[K]): Future[Seq[V]] = storage.load(keys)
+
+  override def save(values: Seq[V]): Future[Unit] = {
+    val valuesByKey = values.map(v => keyExtractor(v) -> v).toMap
+    for {
+      loadedValues <- load(valuesByKey.keySet)
+      loadedValuesByKey = loadedValues.map(v => keyExtractor(v) -> v).toMap
+      toSave = Vector.newBuilder[V]
+      added = Vector.newBuilder[V]
+      updated = Vector.newBuilder[(V, V)]
+      _ = valuesByKey.foreach { case (key, next) =>
+        val current = loadedValuesByKey.get(key)
+        current match {
+          case Some(value) if value != next =>
+            toSave += next
+            updated += value -> next
+          case None =>
+            toSave += next
+            added += next
+          case _ => // unchanged, ignore
+        }
+        next
+      }
+      _ <- storage.save(toSave.result())
+    } yield {
+      val addedResult = added.result
+      val updatedResult = updated.result
+      if (addedResult.nonEmpty) onAdded ! addedResult
+      if (updatedResult.nonEmpty) onUpdated ! updatedResult
+    }
+  }
+
+  override def delete(keys: Set[K]): Future[Unit] = storage.delete(keys).map(_ => onDeleted ! keys)
+}
+
 trait CachedStorage[K, V] {
 
   //Need to be defs to allow mocking
@@ -63,6 +199,7 @@ trait CachedStorage[K, V] {
   protected def load(keys: Set[K])(implicit db: DB): Seq[V]
   protected def save(values: Seq[V])(implicit db: DB): Unit
   protected def delete(keys: Iterable[K])(implicit db: DB): Unit
+
   protected def updateInternal(key: K, updater: V => V)(current: V): Future[Option[(V, V)]]
 
   def find[A, B](predicate: V => Boolean, search: DB => Managed[TraversableOnce[V]], mapping: V => A)(implicit cb: CanBuild[A, B]): Future[B]
