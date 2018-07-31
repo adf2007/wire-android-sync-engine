@@ -62,7 +62,7 @@ lazy val root = Project("zmessaging-android", file("."))
       (test in unit in Test).value
     },
     addCommandAlias("testQuick", ";unit/testQuick"),
-    addCommandAlias("testOnly", ";unit/testOnly"),
+//    addCommandAlias("testOnly", ";unit/testOnly"),
 
 //    test in IntegrationTest := {
 //      (ndkBuild in zmessaging).value

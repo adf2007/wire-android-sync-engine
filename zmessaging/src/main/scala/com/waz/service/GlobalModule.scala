@@ -39,7 +39,7 @@ import com.waz.threading.Threading
 import com.waz.ui.MemoryImageCache
 import com.waz.ui.MemoryImageCache.{Entry, Key}
 import com.waz.utils.Cache
-import com.waz.utils.wrappers.{Context, GoogleApi, GoogleApiImpl}
+import com.waz.utils.wrappers.{Context, DB, GoogleApi, GoogleApiImpl}
 import com.waz.znet2.HttpClientOkHttpImpl
 import com.waz.znet2.http.Request.UrlCreator
 import com.waz.znet2.http.{HttpClient, RequestInterceptor}
@@ -78,6 +78,7 @@ trait GlobalModule {
   def audioTranscoder:      AudioTranscoder
   def loaderService:        AssetLoaderService
   def cacheCleanup:         CacheCleaningService
+  def accountsStorage2:     AccountStorage2
   def accountsStorage:      AccountStorage
   def accountsStorageOld:   AccountsStorageOld
   def teamsStorage:         TeamsStorage
@@ -150,6 +151,7 @@ class GlobalModuleImpl(val context: AContext, val backend: BackendConfig) extend
 
   lazy val cacheCleanup                                          = wire[CacheCleaningService]
 
+  lazy val accountsStorage2:     AccountStorage2                 = new AccountStorageImpl2(context, storage.dbHelper.getWritableDatabase, scala.concurrent.ExecutionContext.Implicits.global)
   lazy val accountsStorage:     AccountStorage                   = wire[AccountStorageImpl]
 
   lazy val teamsStorage:        TeamsStorage                     = wire[TeamsStorageImpl]
@@ -201,6 +203,7 @@ class EmptyGlobalModule extends GlobalModule {
   override def audioTranscoder:       AudioTranscoder                                     = ???
   override def loaderService:         AssetLoaderService                                  = ???
   override def cacheCleanup:          CacheCleaningService                                = ???
+  override def accountsStorage2:      AccountStorage2                                     = ???
   override def accountsStorage:       AccountStorage                                      = ???
   override def accountsStorageOld:    AccountsStorageOld                                  = ???
   override def teamsStorage:          TeamsStorage                                        = ???
