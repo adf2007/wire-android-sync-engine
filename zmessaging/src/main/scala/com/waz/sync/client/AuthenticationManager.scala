@@ -74,7 +74,7 @@ class AuthenticationManager(id: UserId, accStorage: AccountStorage2, client: Log
 
   private def wipeCredentials(): Future[Unit] = {
     verbose("wipe credentials")
-    accStorage.delete(id)
+    accStorage.deleteByKey(id)
   }
 
   def invalidateToken(): Future[Unit] = token.map(_.foreach(t => updateCredentials(Some(t.copy(expiresAt = Instant.EPOCH)))))

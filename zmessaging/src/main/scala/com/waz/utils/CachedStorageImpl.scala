@@ -53,18 +53,18 @@ object StorageDao {
 
 trait Storage2[K,V] {
   //TODO Think about access modifiers
-  protected[utils] val keyExtractor: V => K
-  implicit protected[utils] def ec: ExecutionContext
+  def keyExtractor: V => K
+  implicit def ec: ExecutionContext
 
-  def load(keys: Set[K]): Future[Seq[V]]
-  def save(values: Iterable[V]): Future[Unit]
-  def delete(keys: Set[K]): Future[Unit]
+  def loadAll(keys: Set[K]): Future[Seq[V]]
+  def saveAll(values: Iterable[V]): Future[Unit]
+  def deleteAllByKey(keys: Set[K]): Future[Unit]
 
-  def load(key: K): Future[Option[V]] = load(Set(key)).map(_.headOption)
-  def save(value: V): Future[Unit] = save(List(value))
-  def delete(key: K): Future[Unit] = delete(Set(key))
-  def deleteValues(values: Iterable[V]): Future[Unit] = delete(values.map(keyExtractor).toSet)
-  def deleteValue(value: V): Future[Unit] = deleteValues(List(value))
+  def load(key: K): Future[Option[V]] = loadAll(Set(key)).map(_.headOption)
+  def save(value: V): Future[Unit] = saveAll(List(value))
+  def deleteByKey(key: K): Future[Unit] = deleteAllByKey(Set(key))
+  def deleteAll(values: Iterable[V]): Future[Unit] = deleteAllByKey(values.map(keyExtractor).toSet)
+  def delete(value: V): Future[Unit] = deleteAll(List(value))
   def update(key: K, updater: V => V): Future[Option[(V, V)]] =
     load(key).flatMap {
       case None => Future.successful(None)
@@ -96,59 +96,59 @@ trait ReactiveStorage2[K, V] extends Storage2[K, V] {
 
 class DbStorage2[K,V](dao: StorageDao[K,V])
                      (implicit
-                      override protected[utils] val ec: ExecutionContext,
+                      override val ec: ExecutionContext,
                       db: DB) extends Storage2[K,V] {
 
-  override protected[utils] val keyExtractor: V => K = dao.idExtractor
+  override val keyExtractor: V => K = dao.idExtractor
 
-  override def load(keys: Set[K]): Future[Seq[V]] = Future(dao.getAll(keys))
-  override def save(values: Iterable[V]): Future[Unit] = Future(dao.insertOrReplace(values))
-  override def delete(keys: Set[K]): Future[Unit] = Future(dao.deleteEvery(keys))
+  override def loadAll(keys: Set[K]): Future[Seq[V]] = Future(dao.getAll(keys))
+  override def saveAll(values: Iterable[V]): Future[Unit] = Future(dao.insertOrReplace(values))
+  override def deleteAllByKey(keys: Set[K]): Future[Unit] = Future(dao.deleteEvery(keys))
 }
 
 class InMemoryStorage2[K, V](cache: LruCache[K, V],
-                             override protected[utils] val keyExtractor: V => K)
+                             override val keyExtractor: V => K)
                             (implicit
-                             override protected[utils] val ec: ExecutionContext) extends Storage2[K, V] {
+                             override val ec: ExecutionContext) extends Storage2[K, V] {
 
-  override def load(keys: Set[K]): Future[Seq[V]] = Future(keys.toSeq.flatMap(k => Option(cache.get(k))))
-  override def save(values: Iterable[V]): Future[Unit] = Future(values.foreach(v => cache.put(keyExtractor(v), v)))
-  override def delete(keys: Set[K]): Future[Unit] = Future(keys.foreach(cache.remove))
+  override def loadAll(keys: Set[K]): Future[Seq[V]] = Future(keys.toSeq.flatMap(k => Option(cache.get(k))))
+  override def saveAll(values: Iterable[V]): Future[Unit] = Future(values.foreach(v => cache.put(keyExtractor(v), v)))
+  override def deleteAllByKey(keys: Set[K]): Future[Unit] = Future(keys.foreach(cache.remove))
 }
 
 class CachedStorage2[K,V](main: Storage2[K,V], cache: Storage2[K,V])
                          (implicit
-                          override protected[utils] val ec: ExecutionContext) extends Storage2[K, V] {
+                          override val ec: ExecutionContext) extends Storage2[K, V] {
 
   require(main.keyExtractor == cache.keyExtractor)//TODO Think how to make utils explicit
 
-  override protected[utils] val keyExtractor: V => K = main.keyExtractor
+  override val keyExtractor: V => K = main.keyExtractor
 
-  override def load(keys: Set[K]): Future[Seq[V]] =
+  override def loadAll(keys: Set[K]): Future[Seq[V]] =
     for {
-      fromCache <- cache.load(keys)
+      fromCache <- cache.loadAll(keys)
       fromMain <-
         if (keys.size == fromCache.size) Future.successful(Seq.empty)
         else {
           val cachedKeys = fromCache.map(keyExtractor)
           val missingKeys = keys -- cachedKeys
-          main.load(missingKeys)
+          main.loadAll(missingKeys)
         }
     } yield {
-      if (fromMain.nonEmpty) cache.save(fromMain)
+      if (fromMain.nonEmpty) cache.saveAll(fromMain)
       fromCache ++ fromMain
     }
 
-  override def save(values: Iterable[V]): Future[Unit] =
+  override def saveAll(values: Iterable[V]): Future[Unit] =
     for {
-      _ <- main.save(values)
-      _ <- cache.save(values)
+      _ <- main.saveAll(values)
+      _ <- cache.saveAll(values)
     } yield ()
 
-  override def delete(keys: Set[K]): Future[Unit] = {
+  override def deleteAllByKey(keys: Set[K]): Future[Unit] = {
     for {
-      _ <- main.delete(keys)
-      _ <- cache.delete(keys)
+      _ <- main.deleteAllByKey(keys)
+      _ <- cache.deleteAllByKey(keys)
     } yield ()
   }
 
@@ -160,15 +160,15 @@ class ReactiveStorageImpl2[K, V](storage: Storage2[K,V]) extends ReactiveStorage
   override val onUpdated: SourceStream[Seq[(V, V)]] = EventStream()
   override val onDeleted: SourceStream[Set[K]] = EventStream()
 
-  override protected[utils] val keyExtractor: V => K = storage.keyExtractor
-  override implicit protected[utils] def ec: ExecutionContext = storage.ec
+  override val keyExtractor: V => K = storage.keyExtractor
+  override implicit def ec: ExecutionContext = storage.ec
 
-  override def load(keys: Set[K]): Future[Seq[V]] = storage.load(keys)
+  override def loadAll(keys: Set[K]): Future[Seq[V]] = storage.loadAll(keys)
 
-  override def save(values: Iterable[V]): Future[Unit] = {
+  override def saveAll(values: Iterable[V]): Future[Unit] = {
     val valuesByKey = values.map(v => keyExtractor(v) -> v).toMap
     for {
-      loadedValues <- load(valuesByKey.keySet)
+      loadedValues <- loadAll(valuesByKey.keySet)
       loadedValuesByKey = loadedValues.map(v => keyExtractor(v) -> v).toMap
       toSave = Vector.newBuilder[V]
       added = Vector.newBuilder[V]
@@ -186,7 +186,7 @@ class ReactiveStorageImpl2[K, V](storage: Storage2[K,V]) extends ReactiveStorage
         }
         next
       }
-      _ <- storage.save(toSave.result())
+      _ <- storage.saveAll(toSave.result())
     } yield {
       val addedResult = added.result
       val updatedResult = updated.result
@@ -195,7 +195,7 @@ class ReactiveStorageImpl2[K, V](storage: Storage2[K,V]) extends ReactiveStorage
     }
   }
 
-  override def delete(keys: Set[K]): Future[Unit] = storage.delete(keys).map(_ => onDeleted ! keys)
+  override def deleteAllByKey(keys: Set[K]): Future[Unit] = storage.deleteAllByKey(keys).map(_ => onDeleted ! keys)
 }
 
 trait CachedStorage[K, V] {

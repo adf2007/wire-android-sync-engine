@@ -19,6 +19,7 @@ package com.waz
 
 import com.waz.log.{InternalLog, LogOutput}
 import com.waz.utils.isTest
+import org.scalamock.scalatest.{AsyncMockFactory, MockFactory}
 import org.scalatest._
 
 trait ZIntegrationSpec extends AsyncFeatureSpec
@@ -35,6 +36,8 @@ trait ZIntegrationSpec extends AsyncFeatureSpec
     InternalLog.add(new SystemLogOutput)
   }
 }
+
+trait ZIntegrationMockSpec extends ZIntegrationSpec with AsyncMockFactory
 
 import com.waz.ZLog.LogTag
 import com.waz.log.InternalLog.dateTag

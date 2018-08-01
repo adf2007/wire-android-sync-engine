@@ -19,21 +19,11 @@ package com.waz.utils
 
 import android.support.v4.util.LruCache
 import com.waz.ZIntegrationSpec
-import com.waz.utils.StorageSpec._
+import com.waz.utils.StorageTestData._
 
 import scala.concurrent.ExecutionContext.Implicits.global
 
-
-object StorageSpec {
-  case class TestObject(id: Int, title: String)
-  val testIdExtractor: TestObject => Int = _.id
-}
-
 abstract class StorageSpec(storageCreator: () => Storage2[Int, TestObject]) extends ZIntegrationSpec {
-
-  val values: Set[TestObject] = (1 to 50).map(i => TestObject(id = i, title = s"test object $i")).toSet
-  val keyExtractor: TestObject => Int = _.id
-
   lazy val storageClassName: String = storageCreator().getClass.getName
 
   var storage: Storage2[Int, TestObject] = _
@@ -46,9 +36,9 @@ abstract class StorageSpec(storageCreator: () => Storage2[Int, TestObject]) exte
 
     scenario("Save and load values without preserving the order") {
       for {
-        _ <- storage.save(values)
+        _ <- storage.saveAll(values)
         keys = values.map(keyExtractor)
-        loaded <- storage.load(keys)
+        loaded <- storage.loadAll(keys)
       } yield loaded.map(keyExtractor).toSet shouldBe keys
     }
 
@@ -68,17 +58,17 @@ abstract class StorageSpec(storageCreator: () => Storage2[Int, TestObject]) exte
 
     scenario("In case if not all requested values are not in storage, return values that are in storage") {
       for {
-        _ <- storage.save(values.tail)
-        loaded <- storage.load(values.map(keyExtractor))
+        _ <- storage.saveAll(values.tail)
+        loaded <- storage.loadAll(values.map(keyExtractor))
       } yield loaded.size shouldBe values.size - 1
     }
 
     scenario("Delete values by keys") {
       for {
-        _ <- storage.save(values)
+        _ <- storage.saveAll(values)
         keys = values.map(keyExtractor)
-        _ <- storage.delete(keys)
-        loaded <- storage.load(keys)
+        _ <- storage.deleteAllByKey(keys)
+        loaded <- storage.loadAll(keys)
       } yield loaded.size shouldBe 0
     }
 
@@ -86,17 +76,17 @@ abstract class StorageSpec(storageCreator: () => Storage2[Int, TestObject]) exte
       val value = values.head
       for {
         _ <- storage.save(value)
-        _ <- storage.delete(keyExtractor(value))
+        _ <- storage.deleteByKey(keyExtractor(value))
         loaded <- storage.load(keyExtractor(value))
       } yield loaded shouldBe None
     }
 
     scenario("Delete values") {
       for {
-        _ <- storage.save(values)
-        _ <- storage.deleteValues(values)
+        _ <- storage.saveAll(values)
+        _ <- storage.deleteAll(values)
         keys = values.map(keyExtractor)
-        loaded <- storage.load(keys)
+        loaded <- storage.loadAll(keys)
       } yield loaded.size shouldBe 0
     }
 
@@ -104,7 +94,7 @@ abstract class StorageSpec(storageCreator: () => Storage2[Int, TestObject]) exte
       val value = values.head
       for {
         _ <- storage.save(value)
-        _ <- storage.deleteValue(value)
+        _ <- storage.delete(value)
         loaded <- storage.load(keyExtractor(value))
       } yield loaded shouldBe None
     }
@@ -138,6 +128,6 @@ abstract class StorageSpec(storageCreator: () => Storage2[Int, TestObject]) exte
 
 }
 
-class InMemoryStorageSpec extends StorageSpec(() => new InMemoryStorage2(new LruCache(1000), testIdExtractor))
-class CachedStorageSpec extends StorageSpec(() => new CachedStorage2(new UnlimitedInMemoryStorage(testIdExtractor), new UnlimitedInMemoryStorage(testIdExtractor)))
-class UnlimitedInMemoryStorageSpec extends StorageSpec(() => new UnlimitedInMemoryStorage(testIdExtractor))
+class InMemoryStorageSpec extends StorageSpec(() => new InMemoryStorage2(new LruCache(1000), keyExtractor))
+class CachedStorageBasicSpec extends StorageSpec(() => new CachedStorage2(new UnlimitedInMemoryStorage(keyExtractor), new UnlimitedInMemoryStorage(keyExtractor)))
+class UnlimitedInMemoryStorageSpec extends StorageSpec(() => new UnlimitedInMemoryStorage(keyExtractor))
