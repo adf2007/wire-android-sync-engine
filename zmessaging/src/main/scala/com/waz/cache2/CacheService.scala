@@ -18,19 +18,17 @@
 package com.waz.cache2
 
 import java.io._
-import java.nio.file._
-import java.nio.file.attribute.BasicFileAttributes
 import java.text.DecimalFormat
 
 import com.waz.ZLog.ImplicitTag._
 import com.waz.ZLog.verbose
-import com.waz.cache2.CacheServiceImpl.Encryption
+import com.waz.cache2.CacheService.Encryption
 import com.waz.model.AESKey
 import com.waz.utils.IoUtils
 import com.waz.utils.crypto.AESUtils
 import com.waz.utils.events._
 
-import scala.collection.mutable.ArrayBuffer
+import scala.concurrent.duration.FiniteDuration
 import scala.concurrent.{ExecutionContext, Future}
 
 trait CacheService {
@@ -38,6 +36,8 @@ trait CacheService {
 
   protected def getOutputStream(key: String): OutputStream
   protected def getInputStream(key: String): Option[InputStream]
+
+  def putEncrypted(key: String, file: File): Future[Unit]
 
   def get(key: String)(encryption: Encryption): Future[Option[InputStream]] =
     Future(getInputStream(key).map(encryption.decrypt))
@@ -51,75 +51,67 @@ trait CacheService {
 
 }
 
-trait UnsafeCacheService extends CacheService {
-  def putEncrypted(key: String, file: File): Future[Unit]
-}
+object CacheService {
 
-object FileUtils {
-
-  def getDirectorySize(directory: File)(implicit ec: ExecutionContext): Future[Long] = Future {
-    var size = 0L
-    Files.walkFileTree(Paths.get(directory.toURI), new SimpleFileVisitor[Path]() {
-      override def visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult = {
-        super.visitFile(file, attrs)
-        size += attrs.size()
-        FileVisitResult.CONTINUE
-      }
-    })
-
-    size
+  trait Encryption {
+    def decrypt(is: InputStream): InputStream
+    def encrypt(os: OutputStream): OutputStream
   }
 
-  def getFilesWithAttributes(directory: File)(implicit ec: ExecutionContext): Seq[(Path, BasicFileAttributes)] = {
-    val buffer = ArrayBuffer.empty[(Path, BasicFileAttributes)]
-    Files.walkFileTree(Paths.get(directory.toURI), new SimpleFileVisitor[Path]() {
-      override def visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult = {
-        buffer.append(file -> attrs)
-        FileVisitResult.CONTINUE
-      }
-      override def visitFileFailed(file: Path, exc: IOException): FileVisitResult = {
-        verbose(s"Error occurred while file visiting process. $exc")
-        FileVisitResult.CONTINUE
-      }
-    })
+  case object NoEncryption extends Encryption {
+    override def decrypt(is: InputStream): InputStream   = is
+    override def encrypt(os: OutputStream): OutputStream = os
+  }
 
-    buffer
+  class AESEncryption(val key: AESKey) extends Encryption {
+    override def decrypt(is: InputStream): InputStream   = AESUtils.inputStream(key, is)
+    override def encrypt(os: OutputStream): OutputStream = AESUtils.outputStream(key, os)
+  }
+
+  object AESEncryption {
+    def apply(key: AESKey): AESEncryption = new AESEncryption(key)
   }
 
 }
-
 
 object LoggingUtils {
 
   def formatSize(size: Long): String = {
     if (size <= 0) return "0"
-    val units = Array[String]("B", "kB", "MB", "GB", "TB")
+    val units       = Array[String]("B", "kB", "MB", "GB", "TB")
     val digitGroups = (Math.log10(size) / Math.log10(1024)).toInt
     new DecimalFormat("#,##0.#").format(size / Math.pow(1024, digitGroups)) + " " + units(digitGroups)
   }
 
 }
 
-class LruCacheServiceImpl(cacheDirectory: File, directorySizeThreshold: Long)
-                         (implicit override val ec: ExecutionContext, ev: EventContext) extends UnsafeCacheService {
+class LruCacheServiceImpl(
+    cacheDirectory: File,
+    directorySizeThreshold: Long,
+    sizeCheckingInterval: FiniteDuration
+)(implicit override val ec: ExecutionContext, ev: EventContext)
+    extends CacheService {
 
   private val directorySize: SourceSignal[Long] = Signal()
   directorySize
+    .throttle(sizeCheckingInterval)
     .filter { size =>
       verbose(s"Current cache size: ${LoggingUtils.formatSize(size)}")
       size > directorySizeThreshold
     } { size =>
       var shouldBeCleared = size - directorySizeThreshold
-      verbose(s"Cache directory size threshold reached. Current size: ${LoggingUtils.formatSize(size)}.")
-      FileUtils.getFilesWithAttributes(cacheDirectory)
-        .sortBy(_._2.lastModifiedTime())
-        .takeWhile { case (filePath, attr) =>
-          val file = filePath.toFile
+      verbose(s"Cache directory size threshold reached. Current size: ${LoggingUtils.formatSize(size)}. " +
+        s"Should be cleared: ${LoggingUtils.formatSize(shouldBeCleared)}")
+      cacheDirectory
+        .listFiles()
+        .sortBy(_.lastModified())
+        .takeWhile { file =>
+          val fileSize = file.length()
           if (file.delete()) {
-            verbose(s"File '${file.getName}' removed. Cleared ${LoggingUtils.formatSize(attr.size())}.")
-            shouldBeCleared -= attr.size()
+            verbose(s"File '${file.getName}' removed. Cleared ${LoggingUtils.formatSize(fileSize)}.")
+            shouldBeCleared -= fileSize
           } else {
-            verbose(s"File '${file.getName}' can not be removed. Not cleared ${LoggingUtils.formatSize(attr.size())}.")
+            verbose(s"File '${file.getName}' can not be removed. Not cleared ${LoggingUtils.formatSize(fileSize)}.")
           }
           shouldBeCleared > 0
         }
@@ -128,7 +120,7 @@ class LruCacheServiceImpl(cacheDirectory: File, directorySizeThreshold: Long)
   updateDirectorySize()
 
   def updateDirectorySize(): Unit =
-    FileUtils.getDirectorySize(cacheDirectory).foreach(size => directorySize ! size)
+    Future(cacheDirectory.listFiles().foldLeft(0L)(_ + _.length())).foreach(size => directorySize ! size)
 
   private def getFile(key: String): File = new File(cacheDirectory, key)
 
@@ -140,41 +132,21 @@ class LruCacheServiceImpl(cacheDirectory: File, directorySizeThreshold: Long)
 
   override protected def getInputStream(key: String): Option[InputStream] = {
     val file = getFile(key)
-    if (file.exists()) Some(new FileInputStream(file))
-    else None
+    if (file.exists()) {
+      file.setLastModified(System.currentTimeMillis())
+      Some(new FileInputStream(file))
+    } else None
   }
 
-  override def put(key: String, in: InputStream)(encryption: Encryption): Future[Unit] = {
+  override def put(key: String, in: InputStream)(encryption: Encryption): Future[Unit] =
     super.put(key, in)(encryption).map(_ => updateDirectorySize())
-  }
 
   def putEncrypted(key: String, file: File): Future[Unit] = Future {
-    Files.move(Paths.get(file.toURI), Paths.get(getFile(key).toURI))
-    directorySize ! (directorySize.currentValue.getOrElse(0L) + file.length())
+    val targetFile = new File(cacheDirectory, key)
+    if (targetFile.exists()) targetFile.delete()
+    file.setLastModified(System.currentTimeMillis())
+    file.renameTo(targetFile)
+    updateDirectorySize()
   }
-
-}
-
-object CacheServiceImpl {
-
-  trait Encryption {
-    def decrypt(is: InputStream): InputStream
-    def encrypt(os: OutputStream): OutputStream
-  }
-
-  case object NoEncryption extends Encryption {
-    override def decrypt(is: InputStream): InputStream = is
-    override def encrypt(os: OutputStream): OutputStream = os
-  }
-
-  class AESEncryption(val key: AESKey) extends Encryption {
-    override def decrypt(is: InputStream): InputStream = AESUtils.inputStream(key, is)
-    override def encrypt(os: OutputStream): OutputStream = AESUtils.outputStream(key, os)
-  }
-
-  object AESEncryption {
-    def apply(key: AESKey): AESEncryption = new AESEncryption(key)
-  }
-
 
 }
