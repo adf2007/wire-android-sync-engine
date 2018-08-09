@@ -21,8 +21,10 @@ import java.net.URL
 
 import com.waz.api.impl.ErrorResponse
 import com.waz.sync.client.OpenGraphClient.OpenGraphData
+import com.waz.threading.Threading
 import com.waz.utils.wrappers.URI
 import com.waz.utils.{JsonDecoder, JsonEncoder}
+import com.waz.znet2.http.HttpClient.{ConnectionError, HttpClientError}
 import com.waz.znet2.http._
 import org.json.JSONObject
 
@@ -36,6 +38,7 @@ class OpenGraphClientImpl(implicit httpClient: HttpClient) extends OpenGraphClie
   import OpenGraphClient._
   import HttpClient.dsl._
   import HttpClient.AutoDerivation._
+  import Threading.Implicits.Background
 
   private implicit val OpenGraphDataDeserializer: RawBodyDeserializer[Option[OpenGraphData]] =
     RawBodyDeserializer[String].map(bodyStr => OpenGraphDataResponse.unapply(StringResponse(bodyStr)))
@@ -44,7 +47,12 @@ class OpenGraphClientImpl(implicit httpClient: HttpClient) extends OpenGraphClie
     Request.create(method = Method.Get, url = new URL(uri.toString), headers = Headers("User-Agent" -> DesktopUserAgent))
       .withResultType[Option[OpenGraphData]]
       .withErrorType[ErrorResponse]
-      .executeSafe
+      .execute
+      .map(Right(_))
+      .recover {
+        case _: ConnectionError => Right(None)
+        case err: HttpClientError => Left(ErrorResponse.errorResponseConstructor.constructFrom(err))
+      }
   }
 
 }
